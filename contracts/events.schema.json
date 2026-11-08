@@ -1,0 +1,61 @@
+
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "required": [
+    "id",
+    "job_id",
+    "run_id",
+    "seq",
+    "ts",
+    "kind",
+    "severity",
+    "observer",
+    "source",
+    "detail"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "job_id": {
+      "type": ["string", "null"]
+    },
+    "run_id": {
+      "type": ["string", "null"]
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "kind": {
+      "enum": [
+        "stage",
+        "agent",
+        "system",
+        "file",
+        "proc",
+        "net",
+        "canary",
+        "limit"
+      ]
+    },
+    "severity": {
+      "enum": ["info", "warn", "alert"]
+    },
+    "observer": {
+      "type": "string"
+    },
+    "source": {
+      "type": "string"
+    },
+    "detail": {
+      "type": "object"
+    }
+  },
+  "additionalProperties": true
+}

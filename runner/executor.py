@@ -100,12 +100,14 @@ class SandboxExecutor:
 
         docker_ready = self.is_docker_available()
 
+        if not docker_ready:
+            raise RuntimeError(
+                "Docker is unavailable. Refusing to execute untrusted code outside sandbox."
+            )
+
         try:
-            if docker_ready:
-                outcome, exit_code, stdout_text, stderr_text = await self._run_docker()
-            else:
-                log.info("Docker daemon not reachable; executing via sandboxed host isolation runner")
-                outcome, exit_code, stdout_text, stderr_text = await self._run_isolated_process()
+            outcome, exit_code, stdout_text, stderr_text = await self._run_docker()
+                
         except asyncio.TimeoutError:
             outcome = "timeout"
             exit_code = 124
@@ -174,7 +176,7 @@ class SandboxExecutor:
             f"--pids-limit={self.manifest.limits.pids}",
             f"--hostname={get_profile_hostname(self.manifest.profile)}",
             f"--network={docker_net}",
-            f"-v", f"{self.home_dir}:/home/user/init_mount:ro",
+            f"-v", f"{self.home_dir}:/input:ro",
             f"-w", "/home/user",
         ]
 
@@ -185,7 +187,14 @@ class SandboxExecutor:
             cmd.extend(["-e", f"{k}={v}"])
 
         cmd.append(self.manifest.image)
-        cmd.extend(self.manifest.entrypoint)
+
+        cmd.extend([
+            "sh",
+            "-c",
+            'cp -R /input/. /home/user/ && exec "$@"',
+            "airlock-entrypoint",
+            *self.manifest.entrypoint
+        ])
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,

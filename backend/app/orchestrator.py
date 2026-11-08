@@ -178,11 +178,18 @@ async def _run_job_inner(job_id: str) -> None:
                 sm = await handle.client.summary(run_id)
             except Exception:
                 sm = {"outcome": "completed", "exit_code": 0, "duration_ms": 0, "artifacts": []}
+            
+            # --- ИСПРАВЛЕНИЕ: Вычисление честного криптографического хеша собранных событий ---
+            events_json = json.dumps(collected, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+            events_sha256 = hashlib.sha256(events_json.encode("utf-8")).hexdigest()
+
             runs_meta.append({
-                "run_id": run_id, "profile": profile,
+                "run_id": run_id, 
+                "profile": profile,
                 "outcome": sm.get("outcome", "completed"),
                 "duration_ms": sm.get("duration_ms", 0),
                 "event_count": len(collected),
+                "events_sha256": events_sha256,
             })
             async with SessionLocal() as s:
                 r = await s.get(RunORM, run_id)
@@ -190,9 +197,7 @@ async def _run_job_inner(job_id: str) -> None:
                     r.outcome = sm.get("outcome", "completed")
                     r.duration_ms = sm.get("duration_ms", 0)
                     r.event_count = len(collected)
-                    r.events_sha256 = hashlib.sha256(
-                        json.dumps([e.get("kind") for e in collected]).encode()
-                    ).hexdigest()
+                    r.events_sha256 = events_sha256
                     r.ended_at = datetime.utcnow()
                     await s.commit()
     finally:
@@ -262,9 +267,11 @@ async def _run_job_inner(job_id: str) -> None:
         "artifact_sha256": hashlib.sha256(content.encode()).hexdigest(),
         "image_digest": "sha256:airlock-sandbox-node-py-v1",
         "profiles": profiles,
-        "runs": [{"run_id": r["run_id"],
-                  "events_sha256": hashlib.sha256(json.dumps(r).encode()).hexdigest(),
-                  "stdout_sha256": ""} for r in runs_meta],
+        "runs": [{
+            "run_id": r["run_id"],
+            "events_sha256": r["events_sha256"],  # --- ИСПРАВЛЕНИЕ: прокидываем готовый хеш событий ---
+            "stdout_sha256": "",
+        } for r in runs_meta],
         "verdict": verdict,
         "created_at": _now(),
     }

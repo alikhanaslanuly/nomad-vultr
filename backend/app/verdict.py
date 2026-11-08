@@ -164,7 +164,11 @@ def evaluate(events_by_profile: dict[str, list[dict]]) -> tuple[str, int, list[F
         score = max(score, MALICIOUS_FLOOR)
     elif severity_hits["alert"] > 0 or severity_hits["warn"] > 0:
         verdict = "SUSPICIOUS"
-    elif events_by_profile and any(len(v) > 0 for v in events_by_profile.values()):
+    elif events_by_profile and any(
+        e.get("kind") in {"file", "proc", "net", "canary", "limit"}
+        for events in events_by_profile.values()
+        for e in events
+    ):
         verdict = "SAFE_OBSERVED"
     else:
         verdict = "ERROR"
