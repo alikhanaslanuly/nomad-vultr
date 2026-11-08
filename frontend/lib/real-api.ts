@@ -35,6 +35,7 @@ export function createRealApi(base: string): AirlockApi {
         url(`samples/${encodeURIComponent(id)}/run`),
         jobIdSchema,
         post(input, signal),
+        201,
       ),
     listJobs: (signal) => request(url("jobs"), z.array(jobSchema), { signal }),
   };
