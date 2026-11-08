@@ -3,295 +3,384 @@ import hashlib
 import json
 from datetime import datetime, timezone
 
-from sqlalchemy import select
-
+from app.artifacts import prepare_artifact
+from app.config import settings
 from app.db import SessionLocal
-from app.models import Job, Run as RunORM, Finding as FindingORM
-from app.events_bus import publish, next_seq
-from app.planner import plan as run_planner
+from app.events_bus import next_seq, publish
 from app.explainer import explain as run_explainer
-from app.verdict import evaluate
+from app.harness_templates import pick
+from app.models import Finding as FindingORM, Job, Run as RunORM
+from app.planner import plan as run_planner
 from app.receipts import create_receipt
 from app.runner_factory import get_runner_for, release_runner
-from app.samples_data import SAMPLES
+from app.verdict import evaluate
+
+
+ACTIVE: dict[str, object] = {}
+ACTIVE_RUNS: dict[str, str] = {}
+CANCELLED: set[str] = set()
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return datetime.now(timezone.utc).isoformat()
 
 
-async def _emit_stage(job_id: str, name: str, state: str, message: str = "", run_id: str | None = None):
+async def _emit_stage(
+    job_id: str, name: str, state: str, message: str = "", run_id: str | None = None
+):
+    if run_id is None and state == "start":
+        async with SessionLocal() as session:
+            job = await session.get(Job, job_id)
+            job.stage = name
+            await session.commit()
     seq = await next_seq(job_id)
-    await publish(job_id, {
-        "id": f"evt_{job_id}_{seq}",
-        "job_id": job_id, "run_id": run_id, "seq": seq, "ts": _now(),
-        "kind": "stage", "severity": "info",
-        "observer": "orchestrator", "source": "orchestrator",
-        "detail": {"name": name, "state": state, "run_id": run_id, "message": message},
-    })
-
-
-async def _emit_agent(job_id: str, role: str, step_no: int, summary: str, tin: int, tout: int):
-    seq = await next_seq(job_id)
-    await publish(job_id, {
-        "id": f"evt_{job_id}_{seq}",
-        "job_id": job_id, "run_id": None, "seq": seq, "ts": _now(),
-        "kind": "agent", "severity": "info",
-        "observer": "llm", "source": "orchestrator",
-        "detail": {"role": role, "step_no": step_no, "summary": summary,
-                   "tokens_in": tin, "tokens_out": tout},
-    })
-
-
-def _artifact_facts(content: str, filename: str) -> dict:
-    """Static facts only. Never passes raw user text as instructions."""
-    return {
-        "filename": filename,
-        "size_bytes": len(content.encode()),
-        "line_count": content.count("\n") + 1,
-        "first_200_chars": content[:200],
-        "contains_urls": [w for w in content.split() if w.startswith(("http://", "https://"))][:10],
-        "mentions": {
-            "credentials": "credentials" in content or "~/.aws" in content,
-            "ssh": "ssh" in content or ".ssh" in content,
-            "npm": "npm" in content,
-            "curl_or_wget": "curl" in content or "wget" in content,
+    await publish(
+        job_id,
+        {
+            "id": f"evt_{job_id}_{seq}",
+            "job_id": job_id,
+            "run_id": run_id,
+            "seq": seq,
+            "ts": _now(),
+            "kind": "stage",
+            "severity": "info",
+            "observer": "orchestrator",
+            "source": "orchestrator",
+            "detail": {
+                "name": name,
+                "state": state,
+                "run_id": run_id,
+                "message": message,
+            },
         },
-    }
+    )
 
 
-def _kind_from_filename(filename: str) -> str:
-    if filename.endswith((".py",)): return "python"
-    if filename.endswith(("package.json",)): return "npm"
-    return "bash"
+async def _emit_agent(
+    job_id: str, role: str, step_no: int, summary: str, tin: int, tout: int
+):
+    seq = await next_seq(job_id)
+    await publish(
+        job_id,
+        {
+            "id": f"evt_{job_id}_{seq}",
+            "job_id": job_id,
+            "run_id": None,
+            "seq": seq,
+            "ts": _now(),
+            "kind": "agent",
+            "severity": "info",
+            "observer": "llm",
+            "source": "orchestrator",
+            "detail": {
+                "role": role,
+                "step_no": step_no,
+                "summary": summary,
+                "tokens_in": tin,
+                "tokens_out": tout,
+            },
+        },
+    )
+
+
+async def _fleet_events(job_id: str, events: list[dict]):
+    for event in events:
+        seq = await next_seq(job_id)
+        await publish(
+            job_id,
+            {
+                **event,
+                "id": f"evt_{job_id}_{seq}",
+                "job_id": job_id,
+                "seq": seq,
+                "run_id": None,
+            },
+        )
+
+
+async def stop_job(job_id: str):
+    CANCELLED.add(job_id)
+    handle = ACTIVE.get(job_id)
+    run_id = ACTIVE_RUNS.get(job_id)
+    if handle and run_id:
+        await handle.client.kill(run_id)
 
 
 async def run_job(job_id: str) -> None:
     try:
         await _run_job_inner(job_id)
-    except Exception as e:
-        async with SessionLocal() as s:
-            job = await s.get(Job, job_id)
+    except Exception as error:
+        async with SessionLocal() as session:
+            job = await session.get(Job, job_id)
             if job:
-                job.status = "error"
-                job.verdict = "ERROR"
-                job.stage = "error"
-                job.finished_at = datetime.utcnow()
-                await s.commit()
-        await _emit_stage(job_id, "verdict", "error", message=f"{type(e).__name__}: {e}")
+                job.status, job.verdict, job.stage = "error", "ERROR", "verdict"
+                job.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                await session.commit()
+        from fleet.manager import FleetError
+
+        message = (
+            str(error)
+            if isinstance(error, FleetError)
+            else f"Analysis failed: {type(error).__name__}. No successful sandbox result is implied."
+        )
+        await _emit_stage(job_id, "verdict", "error", message=message)
+    finally:
+        ACTIVE.pop(job_id, None)
+        ACTIVE_RUNS.pop(job_id, None)
+        CANCELLED.discard(job_id)
 
 
 async def _run_job_inner(job_id: str) -> None:
-    # ---- load job ----
-    async with SessionLocal() as s:
-        job = await s.get(Job, job_id)
-        if not job:
+    async with SessionLocal() as session:
+        job = await session.get(Job, job_id)
+        if job is None:
             return
-        content = job.input_ref
-        filename = "install.sh"
-        claim_text = job.claim_text or ""
-        profiles = list(job.profiles or ["dev-laptop", "ci"])
-        tier = job.isolation_tier or "standard"
+        artifact = prepare_artifact(job.input_type, job.input_ref, job.filename)
+        profiles, tier, claim_text = (
+            list(job.profiles),
+            job.isolation_tier,
+            job.claim_text,
+        )
+        job.execution_mode = "mock" if settings.USE_STUB_RUNNER else "live"
+        sample_id = job.sample_id
         job.status = "running"
-        await s.commit()
-
-    # ---- plan ----
-    await _emit_stage(job_id, "plan", "start")
+        await session.commit()
     await _emit_stage(job_id, "fetch", "start")
-    # (fetch stage would download npm/zip inside the sandbox — out of scope here)
-    await _emit_stage(job_id, "fetch", "end")
-
-    facts = _artifact_facts(content, filename)
-    kind = _kind_from_filename(filename)
-    try:
-        planner_out, tin, tout, _ph = await run_planner(job_id, facts, profiles, kind)
-    except Exception as e:
-        planner_out = {
-            "hypotheses": [{"id": "h1", "text": "Observe behaviour"}],
-            "experiments": [{"profile": p, "focus": "all"} for p in profiles],
-            "harness": __import__("app.harness_templates", fromlist=["pick"]).pick(kind),
-        }
-        tin = tout = 0
-        await _emit_stage(job_id, "plan", "error", message=f"Planner fallback: {e}")
-    else:
-        async with SessionLocal() as s:
-            j = await s.get(Job, job_id)
-            j.llm_tokens_in += tin; j.llm_tokens_out += tout
-            await s.commit()
-        await _emit_agent(job_id, "planner", 1,
-                          f"{len(planner_out['hypotheses'])} hypotheses; harness={planner_out['harness'].get('template','?')}",
-                          tin, tout)
-    await _emit_stage(job_id, "plan", "end")
-
-    # ---- run per profile ----
+    await _emit_stage(
+        job_id,
+        "fetch",
+        "end",
+        message=f"Validated {len(artifact.files)} artifact files; no code executed on control plane",
+    )
+    await _emit_stage(job_id, "plan", "start")
+    harness = pick(artifact.kind)
+    facts = {
+        "filename": artifact.filename,
+        "entrypoint": artifact.entrypoint,
+        "files": [
+            {"path": path, "size": len(content)}
+            for path, content in artifact.files.items()
+        ],
+    }
+    plan_message = ""
+    if settings.INFERENCE_API_KEY:
+        try:
+            plan, tin, tout, _ = await run_planner(
+                job_id, facts, profiles, artifact.kind
+            )
+            await _emit_agent(
+                job_id,
+                "planner",
+                1,
+                f"{len(plan['hypotheses'])} hypotheses; trusted {artifact.kind} harness",
+                tin,
+                tout,
+            )
+        except Exception:
+            plan_message = (
+                "Inference unavailable; trusted deterministic harness selected"
+            )
+    await _emit_stage(job_id, "plan", "end", message=plan_message)
     await _emit_stage(job_id, "run", "start")
-    events_by_profile: dict[str, list[dict]] = {}
-    runs_meta: list[dict] = []
-    handle = get_runner_for(tier, job_id)
-
-    # propagate fleet's vm_create events if burn
-    for ev in (handle.created_events or []):
-        seq = await next_seq(job_id)
-        await publish(job_id, {**ev, "id": f"evt_{job_id}_{seq}", "job_id": job_id, "seq": seq, "ts": _now()})
-
+    handle = await asyncio.to_thread(get_runner_for, tier, job_id)
+    ACTIVE[job_id] = handle
+    collected_by_profile: dict[str, list[dict]] = {}
+    runs = []
     try:
+        await _fleet_events(job_id, handle.created_events or [])
         for profile in profiles:
+            if job_id in CANCELLED:
+                break
             run_id = f"run_{job_id}_{profile}"
+            environment = {
+                "AIRLOCK_ARTIFACT_ENTRY": artifact.entrypoint,
+                "AIRLOCK_ARTIFACT_KIND": artifact.kind,
+            }
+            if settings.USE_STUB_RUNNER:
+                if not sample_id:
+                    raise RuntimeError("Mock runner only accepts named team samples")
+                environment["AIRLOCK_SAMPLE"] = sample_id
             manifest = {
                 "run_id": run_id,
                 "profile": profile,
                 "image": "airlock-sandbox:node-py",
                 "files": [
-                    *[{"path": f["path"], "content_b64": _b64(f["content"])} for f in planner_out["harness"]["files"]],
-                    {"path": f"work/artifact/{filename}", "content_b64": _b64(content)},
-                ],
-                "entrypoint": planner_out["harness"]["entrypoint"],
-                "env": {},
-                "limits": {"cpu": 1.0, "mem_mb": 512, "pids": 128, "timeout_s": 30,
-                           "disk_mb": 128, "stdout_kb": 256},
+                    {"path": item["path"], "content_b64": _b64(item["content"])}
+                    for item in harness["files"]
+                ]
+                + artifact.manifest_files(),
+                "entrypoint": harness["entrypoint"],
+                "env": environment,
+                "limits": {
+                    "cpu": 1.0,
+                    "mem_mb": 512,
+                    "pids": 128,
+                    "timeout_s": 30,
+                    "disk_mb": 128,
+                    "stdout_kb": 256,
+                },
                 "network": {"mode": "honeynet", "allowlist": []},
                 "canary_set": "default",
-                "fetch": {"type": None, "ref": None},
             }
-            try:
-                await handle.client.start_run(manifest)
-            except Exception as e:
-                await _emit_stage(job_id, "run", "error", message=f"{profile}: {e}", run_id=run_id)
-                continue
-
-            async with SessionLocal() as s:
-                s.add(RunORM(id=run_id, job_id=job_id, profile=profile,
-                             limits_json=manifest["limits"]))
-                await s.commit()
-
-            collected: list[dict] = []
-            async for ev in handle.client.stream_events(run_id):
+            await handle.client.start_run(manifest)
+            ACTIVE_RUNS[job_id] = run_id
+            async with SessionLocal() as session:
+                session.add(
+                    RunORM(
+                        id=run_id,
+                        job_id=job_id,
+                        profile=profile,
+                        limits_json=manifest["limits"],
+                    )
+                )
+                await session.commit()
+            events = []
+            async for event in handle.client.stream_events(run_id):
+                if event.get("source") not in {"host", "orchestrator"} or event.get(
+                    "run_id"
+                ) not in {None, run_id}:
+                    raise ValueError("Invalid Runner event identity or source")
+                if (
+                    event.get("kind") in {"file", "proc", "net", "canary", "limit"}
+                    and event["source"] != "host"
+                ):
+                    raise ValueError("Behavioral evidence must originate from the host")
                 seq = await next_seq(job_id)
-                out = {**ev, "id": ev.get("id") or f"evt_{job_id}_{seq}",
-                       "job_id": job_id, "run_id": run_id, "seq": seq,
-                       "ts": ev.get("ts") or _now()}
-                collected.append(out)
-                await publish(job_id, out)
-
-            events_by_profile[profile] = collected
-            try:
-                sm = await handle.client.summary(run_id)
-            except Exception:
-                sm = {"outcome": "completed", "exit_code": 0, "duration_ms": 0, "artifacts": []}
-            
-            # --- ИСПРАВЛЕНИЕ: Вычисление честного криптографического хеша собранных событий ---
-            events_json = json.dumps(collected, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-            events_sha256 = hashlib.sha256(events_json.encode("utf-8")).hexdigest()
-
-            runs_meta.append({
-                "run_id": run_id, 
-                "profile": profile,
-                "outcome": sm.get("outcome", "completed"),
-                "duration_ms": sm.get("duration_ms", 0),
-                "event_count": len(collected),
-                "events_sha256": events_sha256,
-            })
-            async with SessionLocal() as s:
-                r = await s.get(RunORM, run_id)
-                if r:
-                    r.outcome = sm.get("outcome", "completed")
-                    r.duration_ms = sm.get("duration_ms", 0)
-                    r.event_count = len(collected)
-                    r.events_sha256 = events_sha256
-                    r.ended_at = datetime.utcnow()
-                    await s.commit()
+                output = {**event, "job_id": job_id, "run_id": run_id, "seq": seq}
+                output = await publish(job_id, output)
+                events.append(output)
+            summary = await handle.client.summary(run_id)
+            if not settings.USE_STUB_RUNNER and not summary.get("observation_complete"):
+                raise RuntimeError("Runtime observation is incomplete")
+            event_hash = hashlib.sha256(
+                json.dumps(
+                    events, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+                ).encode()
+            ).hexdigest()
+            runs.append(
+                {
+                    "run_id": run_id,
+                    "profile": profile,
+                    **summary,
+                    "events_sha256": event_hash,
+                }
+            )
+            collected_by_profile[profile] = sorted(
+                events, key=lambda event: event["ts"]
+            )
+            async with SessionLocal() as session:
+                row = await session.get(RunORM, run_id)
+                row.outcome, row.exit_code = summary["outcome"], summary["exit_code"]
+                row.duration_ms, row.event_count = summary["duration_ms"], len(events)
+                row.events_sha256 = event_hash
+                row.ended_at = datetime.now(timezone.utc).replace(tzinfo=None)
+                await session.commit()
+            ACTIVE_RUNS.pop(job_id, None)
     finally:
-        destroy = tier == "burn"
         try:
-            extra = release_runner(handle, destroy=destroy)
-        except Exception:
-            extra = []
-        for ev in extra:
-            seq = await next_seq(job_id)
-            await publish(job_id, {**ev, "id": f"evt_{job_id}_{seq}", "job_id": job_id,
-                                   "seq": seq, "ts": _now()})
-
+            active_run = ACTIVE_RUNS.pop(job_id, None)
+            if active_run:
+                await handle.client.kill(active_run)
+        finally:
+            extra = await asyncio.to_thread(release_runner, handle, tier == "burn")
+            await _fleet_events(job_id, extra)
     await _emit_stage(job_id, "run", "end")
-
-    # ---- observe/verify stages are folded into the event stream we already have ----
     await _emit_stage(job_id, "observe", "start")
     await _emit_stage(job_id, "observe", "end")
-
-    # ---- verdict ----
-    await _emit_stage(job_id, "verdict", "start")
-    verdict, score, findings = evaluate(events_by_profile)
-
-    # ---- explainer (narrative only, cannot change verdict) ----
-    try:
-        narrative, tin, tout = await run_explainer(
-            verdict=verdict,
-            artifact_claim=claim_text,
-            findings=[{
-                "id": f.id, "severity": f.severity, "rule": f.rule,
-                "claim": f.claim, "observed": f.observed,
-                "evidence_event_ids": f.evidence_event_ids,
-            } for f in findings],
-            event_summaries=[
-                {"id": e["id"], "kind": e["kind"], "severity": e["severity"],
-                 "detail_trim": _trim(e.get("detail", {}))}
-                for run_events in events_by_profile.values() for e in run_events
-            ],
+    await _emit_stage(job_id, "verify", "start")
+    verdict, score, findings = evaluate(collected_by_profile)
+    if job_id in CANCELLED or (
+        verdict == "SAFE_OBSERVED"
+        and (
+            len(runs) != len(profiles)
+            or not all(run["outcome"] == "completed" for run in runs)
         )
-        async with SessionLocal() as s:
-            j = await s.get(Job, job_id)
-            j.llm_tokens_in += tin; j.llm_tokens_out += tout
-            await s.commit()
-        await _emit_agent(job_id, "explainer", 2, narrative.get("headline", "")[:120], tin, tout)
-    except Exception as e:
-        narrative = {"headline": f"Verdict: {verdict}", "behavior_summary": "", "recommendations": [], "claim_mismatch": None}
-        await _emit_stage(job_id, "verdict", "error", message=f"Explainer: {e}")
-
-    # persist findings
-    async with SessionLocal() as s:
-        for f in findings:
-            s.add(FindingORM(
-                id=f.id, job_id=job_id, severity=f.severity, rule=f.rule,
-                claim=f.claim, observed=f.observed,
-                evidence_event_ids=f.evidence_event_ids, code_ref=f.code_ref,
-            ))
-        j = await s.get(Job, job_id)
-        j.verdict = verdict
-        j.risk_score = score
-        j.stage = "verdict"
-        j.status = "done"
-        j.finished_at = datetime.utcnow()
-        await s.commit()
-
-    # ---- receipt ----
-    manifest = {
-        "artifact_sha256": hashlib.sha256(content.encode()).hexdigest(),
-        "image_digest": "sha256:airlock-sandbox-node-py-v1",
+    ):
+        verdict, score = "ERROR", 0
+    verify_message = ""
+    if settings.INFERENCE_API_KEY:
+        try:
+            narrative, tin, tout = await run_explainer(
+                verdict,
+                claim_text,
+                [
+                    {
+                        "id": finding.id,
+                        "rule": finding.rule,
+                        "observed": finding.observed,
+                        "evidence_event_ids": finding.evidence_event_ids,
+                    }
+                    for finding in findings
+                ],
+                [
+                    {"id": event["id"], "kind": event["kind"]}
+                    for events in collected_by_profile.values()
+                    for event in events
+                ][:200],
+            )
+            await _emit_agent(
+                job_id,
+                "explainer",
+                2,
+                str(narrative.get("headline", ""))[:500],
+                tin,
+                tout,
+            )
+            async with SessionLocal() as session:
+                job = await session.get(Job, job_id)
+                job.llm_model = settings.INFERENCE_MODEL_EXPLAINER
+                job.llm_tokens_in += tin
+                job.llm_tokens_out += tout
+                await session.commit()
+        except Exception:
+            verify_message = "Narrative inference unavailable; verdict remains based on host evidence"
+    async with SessionLocal() as session:
+        for finding in findings:
+            session.add(
+                FindingORM(
+                    id=f"{job_id}_{finding.id}",
+                    job_id=job_id,
+                    severity=finding.severity,
+                    rule=finding.rule,
+                    claim=claim_text or finding.claim,
+                    observed=finding.observed,
+                    evidence_event_ids=finding.evidence_event_ids,
+                    code_ref=finding.code_ref,
+                )
+            )
+        job = await session.get(Job, job_id)
+        job.verdict, job.risk_score, job.stage = verdict, score, "verify"
+        await session.commit()
+    receipt_manifest = {
+        "artifact_sha256": artifact.sha256,
+        "image_digest": runs[0].get("image_digest", "") if runs else "",
         "profiles": profiles,
-        "runs": [{
-            "run_id": r["run_id"],
-            "events_sha256": r["events_sha256"],  # --- ИСПРАВЛЕНИЕ: прокидываем готовый хеш событий ---
-            "stdout_sha256": "",
-        } for r in runs_meta],
+        "runs": [
+            {
+                "run_id": run["run_id"],
+                "events_sha256": run["events_sha256"],
+                "stdout_sha256": run.get("stdout_sha256", ""),
+            }
+            for run in runs
+        ],
         "verdict": verdict,
         "created_at": _now(),
+        "mode": "mock" if settings.USE_STUB_RUNNER else "live",
     }
-    async with SessionLocal() as s:
-        receipt = await create_receipt(s, job_id, manifest)
+    async with SessionLocal() as session:
+        await create_receipt(session, job_id, receipt_manifest)
+    await _emit_stage(job_id, "verify", "end", message=verify_message)
+    await _emit_stage(job_id, "verdict", "start")
+    async with SessionLocal() as session:
+        job = await session.get(Job, job_id)
+        job.status = "error" if verdict == "ERROR" else "done"
+        job.stage = "verdict"
+        job.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        await session.commit()
+    await _emit_stage(job_id, "verdict", "end", message=f"verdict={verdict}")
 
-    await _emit_stage(job_id, "verdict", "end",
-                      message=f"verdict={verdict} receipt={receipt['receipt_id']}")
 
-
-def _b64(s: str) -> str:
+def _b64(value: str) -> str:
     import base64
-    return base64.b64encode(s.encode()).decode()
 
-
-def _trim(detail: dict) -> dict:
-    out = {}
-    for k, v in detail.items():
-        if isinstance(v, str) and len(v) > 200:
-            out[k] = v[:200] + "…"
-        else:
-            out[k] = v
-    return out
+    return base64.b64encode(value.encode()).decode()

@@ -56,6 +56,17 @@ export function createMockApi(): AirlockApi {
     });
   };
   return {
+    async getHealth(signal) {
+      signal?.throwIfAborted();
+      return {
+        ok: true,
+        runner: "down",
+        inference: "down",
+        mode: "mock",
+        observer_verified: false,
+        capabilities: { paste: false, zip: false, npm: false, burn: false },
+      };
+    },
     createJob: unavailable,
     getJob,
     async streamEvents(id, options) {
