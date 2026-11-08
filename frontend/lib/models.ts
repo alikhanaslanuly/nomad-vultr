@@ -151,7 +151,7 @@ export const eventSchema = z
 export const jobSchema = z.object({
   job_id: text.min(1),
   status: z.enum(["queued", "running", "done", "error"]),
-  stage: z.enum(stages),
+  stage: z.enum(["queued", ...stages, "error", "killed"]),
   verdict: verdictSchema.nullable(),
   risk_score: z.number().min(0).max(100).nullable().optional(),
   tier: tierSchema,

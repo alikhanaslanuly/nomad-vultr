@@ -1,9 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { createJobSchema, eventSchema, reportSchema } from "../models";
+import { createJobSchema, eventSchema, jobSchema, reportSchema } from "../models";
 import { buildFixture } from "../mock/fixtures";
 
 const fixture = buildFixture("evil-installer", "job-test", ["ci"], 0);
 describe("contract validation", () => {
+  it("accepts backend job lifecycle states and requires a timestamp offset", () => {
+    const job = {
+      job_id: "job-test",
+      status: "queued",
+      stage: "queued",
+      verdict: null,
+      tier: "standard",
+      created_at: "2026-11-08T22:52:17.786115Z",
+    };
+    for (const stage of ["queued", "error", "killed", "verdict"])
+      expect(jobSchema.safeParse({ ...job, stage }).success).toBe(true);
+    expect(
+      jobSchema.safeParse({ ...job, created_at: "2026-11-08T22:52:17.786115" })
+        .success,
+    ).toBe(false);
+    expect(jobSchema.safeParse({ ...job, stage: "unknown" }).success).toBe(false);
+  });
   it("accepts every local fixture event and report without optional invented fields", () => {
     for (const event of fixture.events)
       expect(eventSchema.safeParse(event).success).toBe(true);

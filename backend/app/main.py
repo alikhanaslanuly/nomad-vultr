@@ -23,6 +23,13 @@ from app.runner_factory import get_runner_for
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 log = logging.getLogger("airlock")
 
+
+def _utc_timestamp(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 app = FastAPI(title="Airlock Backend", version=__version__)
 app.add_middleware(
     CORSMiddleware,
@@ -132,7 +139,7 @@ async def list_jobs():
         return [{
             "job_id": j.id, "status": j.status, "stage": j.stage,
             "verdict": j.verdict, "risk_score": j.risk_score, "tier": j.isolation_tier,
-            "created_at": j.created_at.isoformat(), "finished_at": j.finished_at.isoformat() if j.finished_at else None,
+            "created_at": _utc_timestamp(j.created_at), "finished_at": _utc_timestamp(j.finished_at) if j.finished_at else None,
         } for j in rows]
 
 
@@ -145,8 +152,8 @@ async def get_job(job_id: str):
         return {
             "job_id": j.id, "status": j.status, "stage": j.stage,
             "verdict": j.verdict, "risk_score": j.risk_score, "tier": j.isolation_tier,
-            "created_at": j.created_at.isoformat(),
-            "finished_at": j.finished_at.isoformat() if j.finished_at else None,
+            "created_at": _utc_timestamp(j.created_at),
+            "finished_at": _utc_timestamp(j.finished_at) if j.finished_at else None,
         }
 
 
@@ -196,7 +203,8 @@ async def get_report(job_id: str):
             "findings": [{
                 "id": f.id, "severity": f.severity, "rule": f.rule,
                 "claim": f.claim, "observed": f.observed,
-                "evidence_event_ids": f.evidence_event_ids, "code_ref": f.code_ref,
+                "evidence_event_ids": f.evidence_event_ids,
+                **({"code_ref": f.code_ref} if f.code_ref is not None else {}),
             } for f in findings_rows],
             "runs": [{
                 "run_id": r.id, "profile": r.profile, "outcome": r.outcome,

@@ -1,5 +1,6 @@
 import asyncio
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import AsyncIterator
 
 from sqlalchemy import select
@@ -13,6 +14,14 @@ _global_seq: dict[str, int] = defaultdict(int)
 _lock = asyncio.Lock()
 
 
+def _utc_datetime(value: datetime | str) -> datetime:
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 async def next_seq(job_id: str) -> int:
     async with _lock:
         _global_seq[job_id] += 1
@@ -21,12 +30,14 @@ async def next_seq(job_id: str) -> int:
 
 async def publish(job_id: str, event: dict) -> None:
     """Persist + fanout."""
+    timestamp = _utc_datetime(event["ts"])
+    event = {**event, "ts": timestamp.isoformat().replace("+00:00", "Z")}
     async with SessionLocal() as session:
         orm = EventORM(
             job_id=job_id,
             run_id=event.get("run_id"),
             seq=event["seq"],
-            ts=event["ts"],
+            ts=timestamp.replace(tzinfo=None),
             kind=event["kind"],
             severity=event["severity"],
             observer=event["observer"],
@@ -75,7 +86,7 @@ def _to_dict(row: EventORM) -> dict:
         "job_id": row.job_id,
         "run_id": row.run_id,
         "seq": row.seq,
-        "ts": row.ts.isoformat() + "Z" if not row.ts.isoformat().endswith("Z") else row.ts.isoformat(),
+        "ts": _utc_datetime(row.ts).isoformat().replace("+00:00", "Z"),
         "kind": row.kind,
         "severity": row.severity,
         "observer": row.observer,
