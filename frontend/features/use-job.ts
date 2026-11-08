@@ -110,7 +110,7 @@ export function useJob(id: string) {
           if (job.job_id !== id)
             throw new ApiError("wrong_job", "The backend returned a different job.");
           dispatch({ type: "job", job });
-          if (job.status === "done" || job.status === "error") {
+          if (job.status === "done") {
             for (let reportAttempt = 0; reportAttempt < 4; reportAttempt += 1) {
               try {
                 const report = await api.getReport(id, controller.signal);

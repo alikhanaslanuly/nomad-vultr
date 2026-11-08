@@ -66,11 +66,6 @@ export function ReceiptView({ id }: { id: string }) {
       {state.receipt && (
         <>
           <div className="panel report-notes">
-            {state.receipt.manifest.mode === "mock" && (
-              <p role="status">
-                SIMULATED RECEIPT — this records fixture data, not a sandbox execution.
-              </p>
-            )}
             <h2>
               Re-verification: {state.receipt.verify_result?.status ?? "not supplied"}
             </h2>

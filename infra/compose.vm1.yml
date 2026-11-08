@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   caddy:
     image: caddy:2-alpine
@@ -27,10 +29,9 @@ services:
     env_file:
       - ../.env
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-airlock}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-airlock}
-      USE_STUB_RUNNER: "0"
-      RUNNER_URL: ${RUNNER_URL:?Set private Runner URL}
-      RUNNER_TOKEN: ${RUNNER_TOKEN:?Set RUNNER_TOKEN}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-airlock}:${POSTGRES_PASSWORD:-airlock_secret}@postgres:5432/${POSTGRES_DB:-airlock}
+      RUNNER_URL: ${RUNNER_URL:-http://10.77.0.10:9000}
+      RUNNER_TOKEN: ${RUNNER_TOKEN:-airlock-runner-token}
     depends_on:
       postgres:
         condition: service_healthy
@@ -41,9 +42,6 @@ services:
     build:
       context: ../frontend
       dockerfile: Dockerfile
-      args:
-        NEXT_PUBLIC_API_BASE: /api
-        NEXT_PUBLIC_MOCK: "0"
     restart: unless-stopped
     expose:
       - "3000"
@@ -58,7 +56,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-airlock}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airlock_secret}
       POSTGRES_DB: ${POSTGRES_DB:-airlock}
     volumes:
       - pg_data:/var/lib/postgresql/data

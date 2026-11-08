@@ -1,76 +1,123 @@
 #!/usr/bin/env bash
+# ==============================================================================
+# Airlock - VM#2 Sandbox Host Idempotent Setup Script
+# Installs Docker, gVisor (runsc), builds sandbox & sink images,
+# sets up isolated honeynet docker network, and launches the Runner API.
+# ==============================================================================
 set -euo pipefail
-[[ "${EUID}" -eq 0 ]]
-: "${RUNNER_TOKEN:?Provide RUNNER_TOKEN through a secure environment}"
-: "${CONTROL_PLANE_IP:?Set the control plane private IP}"
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+echo "[*] Starting Airlock Sandbox Host (VM#2) setup..."
+
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
-apt-get install -y --no-install-recommends docker.io python3 curl ca-certificates iptables
-systemctl enable --now docker
-if ! command -v runsc >/dev/null; then
-    architecture="$(uname -m)"
-    download_dir="$(mktemp -d)"
-    release_url="https://storage.googleapis.com/gvisor/releases/release/latest/${architecture}"
-    curl --fail --silent --show-error "${release_url}/runsc" --output "${download_dir}/runsc"
-    curl --fail --silent --show-error "${release_url}/runsc.sha512" --output "${download_dir}/runsc.sha512"
-    (cd "${download_dir}" && sha512sum --check runsc.sha512)
-    install --mode=0755 "${download_dir}/runsc" /usr/local/bin/runsc
-    rm -rf "${download_dir}"
+
+# 1. System packages
+echo "[*] Updating apt packages..."
+apt-get update && apt-get install -y --no-install-recommends \
+    apt-transport-https \
+    ca-certificates \
+    curl \
+    gnupg \
+    lsb-release \
+    iptables \
+    ufw \
+    jq
+
+# 2. Install Docker
+if ! command -v docker &> /dev/null; then
+    echo "[*] Installing Docker Engine..."
+    curl -fsSL https://get.docker.com | sh
+    systemctl enable docker
+    systemctl start docker
 fi
-install --directory --mode=0700 /var/log/airlock-runsc
-install --directory --mode=0755 /tmp/airlock-runs /etc/docker
-python3 - <<'CONFIG'
-import json
-from pathlib import Path
-path = Path('/etc/docker/daemon.json')
-config = json.loads(path.read_text()) if path.exists() else {}
-config.setdefault('runtimes', {})['runsc-observed'] = {
-    'path': '/usr/local/bin/runsc',
-    'runtimeArgs': ['--debug-log=/var/log/airlock-runsc/%ID%.%COMMAND%.json',
-                    '--debug-log-format=json', '--debug', '--strace', '--strace-log-size=128',
-                    '--strace-syscalls=read,pread64,readv,preadv,write,pwrite64,writev,pwritev,execve,execveat,connect,clone,clone3,fork,vfork,exit,exit_group']
+
+# 3. Install gVisor (runsc)
+if ! command -v runsc &> /dev/null; then
+    echo "[*] Installing Google gVisor (runsc)..."
+    ARCH=$(uname -m)
+    URL="https://storage.googleapis.com/gvisor/releases/release/latest/${ARCH}"
+    curl -fsSL "${URL}/runsc" -o /usr/local/bin/runsc
+    chmod +x /usr/local/bin/runsc
+fi
+
+# 4. Register runsc in Docker daemon configuration
+echo "[*] Configuring Docker runtime with runsc..."
+mkdir -p /etc/docker
+cat << 'EOF' > /etc/docker/daemon.json
+{
+  "runtimes": {
+    "runsc": {
+      "path": "/usr/local/bin/runsc",
+      "runtimeArgs": [
+        "--debug",
+        "--debug-log-dir=/var/log/runsc",
+        "--strace"
+      ]
+    }
+  }
 }
-temporary = path.with_suffix('.airlock.tmp')
-temporary.write_text(json.dumps(config, indent=2))
-temporary.replace(path)
-CONFIG
-install --mode=0755 "${repo_root}/infra/network_guard.sh" /usr/local/sbin/airlock-network-guard
-install --directory --mode=0755 /etc/airlock /etc/systemd/system/docker.service.d
-printf 'CONTROL_PLANE_IP=%s\n' "${CONTROL_PLANE_IP}" > /etc/airlock/network-guard.conf
-CONTROL_PLANE_IP="${CONTROL_PLANE_IP}" /usr/local/sbin/airlock-network-guard
-cat > /etc/systemd/system/airlock-network-guard.service <<'SERVICE'
-[Unit]
-Description=Airlock sandbox and Runner network isolation
-Before=docker.service
-[Service]
-Type=oneshot
-EnvironmentFile=/etc/airlock/network-guard.conf
-ExecStart=/usr/local/sbin/airlock-network-guard
-RemainAfterExit=yes
-[Install]
-WantedBy=multi-user.target
-SERVICE
-cat > /etc/systemd/system/docker.service.d/airlock-guard.conf <<'SERVICE'
-[Unit]
-Requires=airlock-network-guard.service
-After=airlock-network-guard.service
-SERVICE
-printf 'd /var/log/airlock-runsc 0700 root root 1d -\n' > /etc/tmpfiles.d/airlock-runsc.conf
+EOF
 systemctl daemon-reload
-systemctl enable --now airlock-network-guard.service
 systemctl restart docker
-docker build -t airlock-sandbox:node-py -f "${repo_root}/runner/docker/Dockerfile.sandbox" "${repo_root}"
-docker build -t airlock-sink:latest -f "${repo_root}/runner/docker/Dockerfile.sink" "${repo_root}"
-docker build -t airlock-runner:latest -f "${repo_root}/runner/Dockerfile" "${repo_root}"
-if docker container inspect airlock-runner >/dev/null 2>&1; then
-    docker stop airlock-runner
-    docker rm airlock-runner
+
+# 5. Create Honeynet Docker Network (Internal, isolated)
+echo "[*] Setting up isolated internal honeynet network..."
+if ! docker network inspect airlock-honeynet &> /dev/null; then
+    docker network create \
+      --driver bridge \
+      --internal \
+      --subnet=10.77.0.0/24 \
+      --gateway=10.77.0.1 \
+      airlock-honeynet
 fi
-docker run -d --name airlock-runner --restart unless-stopped --network host --cap-add=NET_ADMIN \
-    -v /var/run/docker.sock:/var/run/docker.sock \
-    -v /tmp/airlock-runs:/tmp/airlock-runs \
-    -v /var/log/airlock-runsc:/var/log/airlock-runsc:ro \
-    -v /sys/fs/cgroup:/host-cgroup:ro \
-    -e RUNNER_TOKEN -e RUNNER_RUNTIME=runsc-observed -e CGROUP_ROOT=/host-cgroup airlock-runner:latest
-curl --fail --silent --show-error http://127.0.0.1:9000/healthz
+
+# 6. Build Sandbox Image (airlock-sandbox:node-py)
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+echo "[*] Building airlock-sandbox:node-py image from ${REPO_ROOT}/runner/docker/Dockerfile.sandbox..."
+docker build -t airlock-sandbox:node-py -f "${REPO_ROOT}/runner/docker/Dockerfile.sandbox" "${REPO_ROOT}/runner/docker"
+
+# 7. Build and Run Honeynet Sink Container
+echo "[*] Building and starting Honeynet Sink container..."
+docker build -t airlock-sink:latest -f "${REPO_ROOT}/runner/docker/Dockerfile.sink" "${REPO_ROOT}/runner/docker"
+docker rm -f airlock-sink 2>/dev/null || true
+docker run -d \
+  --name airlock-sink \
+  --restart unless-stopped \
+  --network airlock-honeynet \
+  --ip 10.77.0.2 \
+  airlock-sink:latest
+
+# 8. Firewall Configuration (UFW / iptables)
+echo "[*] Hardening firewall for VM#2..."
+# Allow SSH and VPC internal subnet, drop public access to port 9000
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow 22/tcp comment "SSH management"
+# Allow traffic from VM#1 private IP or VPC
+if [ -n "${CONTROL_PLANE_IP:-}" ]; then
+    ufw allow from "${CONTROL_PLANE_IP}" to any port 9000 proto tcp comment "Airlock Control Plane"
+else
+    # Default allow RFC1918 private subnets
+    ufw allow from 10.0.0.0/8 to any port 9000 proto tcp
+    ufw allow from 172.16.0.0/12 to any port 9000 proto tcp
+    ufw allow from 192.168.0.0/16 to any port 9000 proto tcp
+fi
+ufw --force enable
+
+# 9. Launch Runner API Service via Docker or Systemd
+echo "[*] Building and starting Airlock Runner Service..."
+docker build -t airlock-runner:latest -f "${REPO_ROOT}/runner/Dockerfile" "${REPO_ROOT}"
+docker rm -f airlock-runner 2>/dev/null || true
+docker run -d \
+  --name airlock-runner \
+  --restart unless-stopped \
+  -p 9000:9000 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v /tmp/airlock-runs:/tmp/airlock-runs \
+  -e RUNNER_TOKEN="${RUNNER_TOKEN:-airlock-runner-token}" \
+  -e RUNNER_RUNTIME=runsc \
+  -e RUNNER_OBSERVER=gvisor \
+  airlock-runner:latest
+
+echo "[+] Airlock Sandbox Host VM#2 setup completed successfully!"
+echo "[+] Health check: curl -H \"Authorization: Bearer ${RUNNER_TOKEN:-airlock-runner-token}\" http://localhost:9000/healthz"
+

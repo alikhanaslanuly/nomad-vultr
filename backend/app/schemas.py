@@ -1,5 +1,5 @@
 from typing import Literal
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 Verdict = Literal["SAFE_OBSERVED", "SUSPICIOUS", "MALICIOUS", "ERROR"]
 Profile = Literal["dev-laptop", "ci", "future-date"]
@@ -8,22 +8,13 @@ Tier = Literal["standard", "burn"]
 
 class JobCreate(BaseModel):
     input_type: Literal["paste", "zip", "npm"]
-    content: str | None = Field(default=None, max_length=3000000)
-    filename: str = Field(default="install.sh", min_length=1, max_length=240)
+    content: str | None = None
+    filename: str = "install.sh"
     ref: str | None = None
-    claim: str | None = Field(default=None, max_length=2000)
-    profiles: list[Profile] = Field(
-        default_factory=lambda: ["dev-laptop", "ci"], min_length=1, max_length=3
-    )
+    claim: str | None = None
+    profiles: list[Profile] = Field(default_factory=lambda: ["dev-laptop", "ci"])
     tier: Tier = "standard"
-    invite_code: str | None = Field(default=None, max_length=200)
-
-    @field_validator("profiles")
-    @classmethod
-    def unique_profiles(cls, value: list[Profile]) -> list[Profile]:
-        if len(set(value)) != len(value):
-            raise ValueError("Profiles must be unique")
-        return value
+    invite_code: str | None = None
 
 
 class JobStatus(BaseModel):
@@ -96,19 +87,4 @@ class LLMHarnessFile(BaseModel):
 class PlannerOutput(BaseModel):
     hypotheses: list[LLMHypothesis]
     experiments: list[LLMExperiment]
-    harness: dict
-
-
-class SampleRun(BaseModel):
-    profiles: list[Profile] = Field(
-        default_factory=lambda: ["dev-laptop", "ci"], min_length=1, max_length=3
-    )
-    tier: Tier = "standard"
-    invite_code: str | None = Field(default=None, max_length=200)
-
-    @field_validator("profiles")
-    @classmethod
-    def unique_profiles(cls, value: list[Profile]) -> list[Profile]:
-        if len(set(value)) != len(value):
-            raise ValueError("Profiles must be unique")
-        return value
+    harness: dict  # {"files": [...], "entrypoint": [...], "notes": "..."}

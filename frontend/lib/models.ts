@@ -64,7 +64,6 @@ export const eventSchema = z
           "runner_ready",
         ]),
         id: text,
-        confirmed: z.boolean().optional(),
         tier: tierSchema.optional(),
         plan: text.optional(),
         region: text.optional(),
@@ -98,11 +97,6 @@ export const eventSchema = z
         port: count.max(65535).optional(),
         proto: text.optional(),
         blocked: z.boolean().optional(),
-        intercepted: z.boolean().optional(),
-        body_truncated: z.boolean().optional(),
-        client_ip: text.optional(),
-        result: z.number().int().optional(),
-        errno: count.optional(),
         bytes_out: count.optional(),
         http: z
           .object({
@@ -126,7 +120,6 @@ export const eventSchema = z
     envelope.extend({
       kind: z.literal("limit"),
       detail: z.object({
-        path: text.optional(),
         resource: z.enum(["cpu", "mem", "pids", "time", "disk"]),
         limit: z.number(),
         observed: z.number().optional(),
@@ -156,7 +149,6 @@ export const eventSchema = z
   });
 
 export const jobSchema = z.object({
-  mode: z.enum(["live", "mock", "unknown"]).optional(),
   job_id: text.min(1),
   status: z.enum(["queued", "running", "done", "error"]),
   stage: z.enum(stages),
@@ -183,7 +175,6 @@ export const findingSchema = z.object({
     .optional(),
 });
 export const reportSchema = z.object({
-  mode: z.enum(["live", "mock", "unknown"]).optional(),
   job_id: text,
   verdict: verdictSchema,
   risk_score: z.number().min(0).max(100),
@@ -214,7 +205,6 @@ export const receiptSchema = z.object({
   receipt_id: text,
   job_id: text,
   manifest: z.object({
-    mode: z.enum(["live", "mock", "unknown"]).optional(),
     artifact_sha256: text,
     image_digest: text,
     profiles: z.array(profileSchema),
@@ -246,7 +236,7 @@ export const samplesSchema = z.array(
 export const createJobSchema = z
   .object({
     input_type: z.enum(["paste", "zip", "npm"]),
-    content: text.max(3000000).optional(),
+    content: text.max(200000).optional(),
     filename: text.max(200).optional(),
     ref: text.max(200).optional(),
     claim: text.max(2000).optional(),
@@ -259,13 +249,6 @@ export const createJobSchema = z
     invite_code: text.max(200).optional(),
   })
   .superRefine((input, context) => {
-    if (input.input_type === "paste" && (input.content?.length ?? 0) > 200000) {
-      context.addIssue({
-        code: "custom",
-        message: "Source text exceeds the display submission limit",
-      });
-      return;
-    }
     if ((input.input_type === "npm" ? input.ref : input.content)?.trim()) return;
     context.addIssue({
       code: "custom",
@@ -284,15 +267,3 @@ export type Sample = z.infer<typeof samplesSchema>[number];
 export type CreateJob = z.infer<typeof createJobSchema>;
 export type Profile = z.infer<typeof profileSchema>;
 export type Verdict = z.infer<typeof verdictSchema>;
-
-export const healthSchema = z.object({
-  ok: z.boolean(),
-  runner: z.enum(["up", "down"]),
-  inference: z.enum(["up", "down"]),
-  mode: z.enum(["live", "mock", "unknown"]).optional(),
-  observer_verified: z.boolean().optional(),
-  capabilities: z
-    .object({ paste: z.boolean(), zip: z.boolean(), npm: z.boolean(), burn: z.boolean() })
-    .optional(),
-});
-export type Health = z.infer<typeof healthSchema>;

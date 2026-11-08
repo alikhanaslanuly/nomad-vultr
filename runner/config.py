@@ -1,19 +1,32 @@
 import os
 
+try:
+    from pydantic_settings import BaseSettings
 
-class RunnerSettings:
-    def __init__(self):
-        self.HOST = "0.0.0.0"
-        self.PORT = 9000
-        self.RUNNER_TOKEN = os.getenv("RUNNER_TOKEN", "")
-        self.RUNTIME_PREFERENCE = os.getenv("RUNNER_RUNTIME", "runsc-observed")
-        self.OBSERVER_TYPE = "gvisor"
-        self.SANDBOX_IMAGE = os.getenv("SANDBOX_IMAGE", "airlock-sandbox:node-py")
-        self.SINK_IMAGE = os.getenv("SINK_IMAGE", "airlock-sink:latest")
-        self.RUNS_DIR = os.getenv("RUNS_DIR", "/tmp/airlock-runs")
-        self.TRACE_DIR = os.getenv("RUNSC_LOG_DIR", "/var/log/airlock-runsc")
-        self.MAX_TRACE_BYTES = 32 * 1024 * 1024
-        self.MAX_EVENTS = 20000
+    class RunnerSettings(BaseSettings):
+        HOST: str = "0.0.0.0"
+        PORT: int = 9000
+        RUNNER_TOKEN: str = os.getenv("RUNNER_TOKEN", "airlock-runner-token")
+        RUNTIME_PREFERENCE: str = os.getenv("RUNNER_RUNTIME", "runsc")  # runsc or runc
+        OBSERVER_TYPE: str = os.getenv("RUNNER_OBSERVER", "gvisor")     # gvisor or strace
+        SANDBOX_IMAGE: str = os.getenv("SANDBOX_IMAGE", "airlock-sandbox:node-py")
+        RUNS_DIR: str = os.getenv("RUNS_DIR", "/tmp/airlock-runs")
+        HONEYNET_NETWORK: str = os.getenv("HONEYNET_NETWORK", "airlock-honeynet")
+        SINK_HOST: str = os.getenv("SINK_HOST", "10.77.0.2")
 
+    settings = RunnerSettings()
 
-settings = RunnerSettings()
+except ImportError:
+    class RunnerSettings:
+        def __init__(self):
+            self.HOST: str = "0.0.0.0"
+            self.PORT: int = 9000
+            self.RUNNER_TOKEN: str = os.getenv("RUNNER_TOKEN", "airlock-runner-token")
+            self.RUNTIME_PREFERENCE: str = os.getenv("RUNNER_RUNTIME", "runsc")
+            self.OBSERVER_TYPE: str = os.getenv("RUNNER_OBSERVER", "gvisor")
+            self.SANDBOX_IMAGE: str = os.getenv("SANDBOX_IMAGE", "airlock-sandbox:node-py")
+            self.RUNS_DIR: str = os.getenv("RUNS_DIR", "/tmp/airlock-runs")
+            self.HONEYNET_NETWORK: str = os.getenv("HONEYNET_NETWORK", "airlock-honeynet")
+            self.SINK_HOST: str = os.getenv("SINK_HOST", "10.77.0.2")
+
+    settings = RunnerSettings()

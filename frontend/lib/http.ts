@@ -25,7 +25,7 @@ export async function request<T>(
   url: string,
   schema: z.ZodType<T>,
   options: RequestInit = {},
-  expectedStatus: number | number[] = 200,
+  expectedStatus = 200,
 ): Promise<T> {
   const response = await fetch(url, {
     ...options,
@@ -50,11 +50,7 @@ export async function request<T>(
     );
   }
   if (!response.ok) throw httpError(response.status, payload);
-  if (
-    !(Array.isArray(expectedStatus) ? expectedStatus : [expectedStatus]).includes(
-      response.status,
-    )
-  )
+  if (response.status !== expectedStatus)
     throw new ApiError(
       "unexpected_status",
       `Unexpected API response (HTTP ${response.status}).`,

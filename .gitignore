@@ -1,9 +1,2 @@
 __pycache__/
 *.pyc
-
-.env
-.env.*
-*.db
-*.log
-.pytest_cache/
-.ruff_cache/

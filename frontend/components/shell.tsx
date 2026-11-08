@@ -22,7 +22,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
         </nav>
         <span className={`mode-badge ${isMock ? "mock" : "live"}`}>
           <span className="status-dot" />
-          {isMock ? "MOCK / SIMULATED" : "API CONNECTION"}
+          {isMock ? "MOCK / SIMULATED" : "LIVE API MODE"}
         </span>
       </header>
       <div className="environment-strip">
