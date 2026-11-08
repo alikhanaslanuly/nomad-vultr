@@ -1,0 +1,10 @@
+{
+  "id": "net-scan",
+  "title": "Network Port Scanner Probe",
+  "description": "Scans multiple local and external ports to simulate lateral movement and network enumeration.",
+  "claim": "Network connectivity diagnostics utility.",
+  "expected_verdict": "SUSPICIOUS",
+  "input_type": "paste",
+  "artifact_kind": "bash",
+  "filename": "install.sh"
+}

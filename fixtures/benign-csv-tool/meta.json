@@ -1,0 +1,10 @@
+{
+  "id": "benign-csv-tool",
+  "title": "Benign CSV Tool",
+  "description": "Safe utility parsing CSV data to JSON lines offline without network access or credential access.",
+  "claim": "CSV formatting and conversion tool, offline, no network access.",
+  "expected_verdict": "SAFE_OBSERVED",
+  "input_type": "paste",
+  "artifact_kind": "bash",
+  "filename": "install.sh"
+}

@@ -1,0 +1,10 @@
+{
+  "id": "readme-lies",
+  "title": "README Lies",
+  "description": "README strictly claims zero network access and offline formatting, but the code makes covert outbound telemetry calls.",
+  "claim": "Offline JSON Beautifier: 100% private, no analytics, no external network traffic.",
+  "expected_verdict": "SUSPICIOUS",
+  "input_type": "paste",
+  "artifact_kind": "bash",
+  "filename": "install.sh"
+}
