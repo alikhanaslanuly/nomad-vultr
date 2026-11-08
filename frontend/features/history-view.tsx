@@ -50,6 +50,7 @@ export function HistoryView() {
                   <tr>
                     <th>Job</th>
                     <th>Status</th>
+                    <th>Mode</th>
                     <th>Verdict</th>
                   </tr>
                 </thead>
@@ -62,6 +63,13 @@ export function HistoryView() {
                         </Link>
                       </th>
                       <td>{job.status}</td>
+                      <td>
+                        {job.mode === "mock"
+                          ? "MOCK"
+                          : job.mode === "live"
+                            ? "API"
+                            : "Unverified"}
+                      </td>
                       <td>
                         {job.verdict ? <VerdictBadge verdict={job.verdict} /> : "Pending"}
                       </td>

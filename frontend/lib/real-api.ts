@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { AirlockApi } from "./api-types";
 import { apiUrl, post, request } from "./http";
 import {
+  healthSchema,
   createJobSchema,
   jobIdSchema,
   jobSchema,
@@ -17,6 +18,7 @@ export function createRealApi(base: string): AirlockApi {
   const url = (path: string) => apiUrl(base, path);
   const job = (id: string) => `jobs/${encodeURIComponent(id)}`;
   return {
+    getHealth: (signal) => request(url("health"), healthSchema, { signal }),
     createJob: (input, signal) =>
       request(url("jobs"), jobIdSchema, post(createJobSchema.parse(input), signal), 201),
     getJob: (id, signal) => request(url(job(id)), jobSchema, { signal }),
@@ -35,6 +37,7 @@ export function createRealApi(base: string): AirlockApi {
         url(`samples/${encodeURIComponent(id)}/run`),
         jobIdSchema,
         post(input, signal),
+        [200, 201],
       ),
     listJobs: (signal) => request(url("jobs"), z.array(jobSchema), { signal }),
   };

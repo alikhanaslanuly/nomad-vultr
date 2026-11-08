@@ -1,191 +1,117 @@
-import re
 import base64
 import binascii
-import logging
-from typing import List, Dict, Any, Optional
+import re
 from datetime import datetime, timezone
 
-log = logging.getLogger(__name__)
 
-CANARY_PREFIX = "AIRLOCK-CANARY-"
-CANARY_REGEX = re.compile(r"AIRLOCK-CANARY-([a-zA-Z0-9_]+)")
+MARKER = re.compile(
+    r"AIRLOCK-CANARY-(aws_creds|ssh_key|npmrc|gh_token|dotenv|kube)(?![A-Za-z0-9])"
+)
 
 
 class CanaryDetector:
     @staticmethod
-    def inspect_data(data: bytes | str, location: str) -> List[Dict[str, Any]]:
-        """
-        Inspects payload data (HTTP body, URL, header, DNS query) for canary markers in:
-        1) raw text
-        2) base64 encoded strings
-        3) hex encoded strings
-        Returns list of canary detection dicts.
-        """
-        detections = []
-        if isinstance(data, str):
-            raw_str = data
-            raw_bytes = data.encode("utf-8", errors="ignore")
-        else:
-            raw_bytes = data
-            raw_str = data.decode("utf-8", errors="ignore")
-
-        # 1. Raw search
-        for match in CANARY_REGEX.finditer(raw_str):
-            canary_id = match.group(1)
-            marker = match.group(0)
-            detections.append({
-                "canary_id": canary_id,
-                "trigger": "exfil_attempt",
-                "marker": marker,
-                "where": location,
-                "encoding": "raw"
-            })
-
-        # 2. Base64 search
-        # Look for potential base64 chunks (min 16 chars)
-        b64_candidates = re.findall(r"[A-Za-z0-9+/]{16,}={0,2}", raw_str)
-        for cand in b64_candidates:
+    def inspect_data(data: bytes | str, location: str) -> list[dict]:
+        text = (
+            data.decode("utf-8", errors="replace") if isinstance(data, bytes) else data
+        )
+        candidates = [(text, "raw")]
+        for value in re.findall(r"[A-Za-z0-9+/]{16,}={0,2}", text):
             try:
-                decoded = base64.b64decode(cand, validate=False).decode("utf-8", errors="ignore")
-                for match in CANARY_REGEX.finditer(decoded):
-                    canary_id = match.group(1)
-                    detections.append({
-                        "canary_id": canary_id,
-                        "trigger": "exfil_attempt",
-                        "marker": match.group(0),
-                        "where": location,
-                        "encoding": "base64"
-                    })
-            except Exception:
-                pass
-
-        # 3. Hex search
-        hex_candidates = re.findall(r"(?:[0-9a-fA-F]{2}){8,}", raw_str)
-        for cand in hex_candidates:
-            try:
-                decoded = bytes.fromhex(cand).decode("utf-8", errors="ignore")
-                for match in CANARY_REGEX.finditer(decoded):
-                    canary_id = match.group(1)
-                    detections.append({
-                        "canary_id": canary_id,
-                        "trigger": "exfil_attempt",
-                        "marker": match.group(0),
-                        "where": location,
-                        "encoding": "hex"
-                    })
-            except Exception:
-                pass
-
-        # Deduplicate detections by (canary_id, where, encoding)
-        unique = []
-        seen = set()
-        for d in detections:
-            key = (d["canary_id"], d["where"], d["encoding"])
-            if key not in seen:
-                seen.add(key)
-                unique.append(d)
-
-        return unique
+                decoded = base64.b64decode(value, validate=True).decode(
+                    "utf-8", errors="replace"
+                )
+                candidates.append((decoded, "base64"))
+            except (binascii.Error, ValueError):
+                continue
+        for value in re.findall(r"(?:[0-9A-Fa-f]{2}){8,}", text):
+            candidates.append(
+                (bytes.fromhex(value).decode("utf-8", errors="replace"), "hex")
+            )
+        hits: dict[tuple[str, str], dict] = {}
+        for value, encoding in candidates:
+            for match in MARKER.finditer(value):
+                hits[(match[1], encoding)] = {
+                    "canary_id": match[1],
+                    "trigger": "exfil_attempt",
+                    "marker": match[0],
+                    "where": location,
+                    "encoding": encoding,
+                }
+        return list(hits.values())
 
 
 class HoneynetSink:
-    def __init__(self):
-        self.detector = CanaryDetector()
+    @staticmethod
+    def envelope(kind: str, detail: dict) -> dict:
+        return {
+            "kind": kind,
+            "detail": detail,
+            "severity": "alert" if kind == "canary" else "warn",
+            "observer": "sink",
+            "source": "host",
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
 
     def process_http_request(
         self,
         method: str,
         host: str,
         path: str,
-        headers: Dict[str, str],
+        headers: dict[str, str],
         body: bytes,
         remote_ip: str,
-        port: int = 80
-    ) -> List[Dict[str, Any]]:
-        """
-        Processes an outbound HTTP request intercepted by the honeynet sink.
-        Generates 'net' and potential 'canary' exfiltration events.
-        """
-        now = datetime.now(timezone.utc).isoformat()
-        events = []
-
-        # 1. Base net event
-        net_detail = {
+        port: int = 80,
+        sink_ip: str | None = None,
+        body_truncated: bool = False,
+    ) -> list[dict]:
+        detail = {
             "op": "http",
             "dest": host,
-            "ip": remote_ip,
+            "client_ip": remote_ip,
             "port": port,
             "proto": "tcp",
             "blocked": True,
             "bytes_out": len(body),
-            "http": {
-                "method": method,
-                "path": path,
-                "host": host
-            }
+            "intercepted": True,
+            "http": {"method": method, "path": path, "host": host},
         }
-        events.append({
-            "kind": "net",
-            "severity": "warn",
-            "observer": "sink",
-            "source": "host",
-            "ts": now,
-            "detail": net_detail
-        })
+        if body_truncated:
+            detail["body_truncated"] = True
+        if sink_ip:
+            detail["ip"] = sink_ip
+        events = [self.envelope("net", detail)]
+        for value, location in [
+            (path, "http_url"),
+            (str(headers), "http_headers"),
+            (body, "http_body"),
+        ]:
+            events.extend(
+                self.envelope("canary", hit)
+                for hit in CanaryDetector.inspect_data(value, location)
+            )
+        return events
 
-        # 2. Check for canary markers in URL, Headers, and Body
-        where_checks = [
-            (path, "http_body" if "/upload" in path or "/exfil" in path else "http_body"),
-            (str(headers), "argv" if "header" in path else "http_body"),
-            (body, "http_body")
+    def process_dns_query(
+        self, query_name: str, client_ip: str, sink_ip: str
+    ) -> list[dict]:
+        events = [
+            self.envelope(
+                "net",
+                {
+                    "op": "dns",
+                    "dest": query_name,
+                    "ip": sink_ip,
+                    "port": 53,
+                    "proto": "udp",
+                    "blocked": True,
+                    "intercepted": True,
+                    "client_ip": client_ip,
+                },
+            )
         ]
-
-        for payload, loc in where_checks:
-            canary_hits = self.detector.inspect_data(payload, loc)
-            for hit in canary_hits:
-                events.append({
-                    "kind": "canary",
-                    "severity": "alert",
-                    "observer": "sink",
-                    "source": "host",
-                    "ts": now,
-                    "detail": hit
-                })
-
+        events.extend(
+            self.envelope("canary", hit)
+            for hit in CanaryDetector.inspect_data(query_name, "dns_name")
+        )
         return events
-
-    def process_dns_query(self, query_name: str, client_ip: str) -> List[Dict[str, Any]]:
-        now = datetime.now(timezone.utc).isoformat()
-        events = []
-
-        net_detail = {
-            "op": "dns",
-            "dest": query_name,
-            "ip": "10.77.0.2",
-            "port": 53,
-            "proto": "udp",
-            "blocked": True,
-            "bytes_out": len(query_name)
-        }
-        events.append({
-            "kind": "net",
-            "severity": "warn",
-            "observer": "sink",
-            "source": "host",
-            "ts": now,
-            "detail": net_detail
-        })
-
-        canary_hits = self.detector.inspect_data(query_name, "dns_name")
-        for hit in canary_hits:
-            events.append({
-                "kind": "canary",
-                "severity": "alert",
-                "observer": "sink",
-                "source": "host",
-                "ts": now,
-                "detail": hit
-            })
-
-        return events
-

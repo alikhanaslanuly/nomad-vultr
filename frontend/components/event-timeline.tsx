@@ -39,6 +39,7 @@ export function EventTimeline({
   onAutoScroll,
   truncated,
   canaryObserved,
+  simulated = isMock,
 }: {
   events: AirlockEvent[];
   report?: Report;
@@ -49,6 +50,7 @@ export function EventTimeline({
   onAutoScroll: (value: boolean) => void;
   truncated: boolean;
   canaryObserved?: boolean;
+  simulated?: boolean;
 }) {
   const end = useRef<HTMLDivElement>(null);
   const selected = useRef<HTMLLIElement>(null);
@@ -94,7 +96,7 @@ export function EventTimeline({
         <div role="alert" className="canary-alert">
           <ShieldAlert size={18} />
           <strong>
-            {isMock ? "SIMULATED CANARY ALERT" : "HOST-REPORTED CANARY ALERT"}
+            {simulated ? "SIMULATED CANARY ALERT" : "HOST-REPORTED CANARY ALERT"}
           </strong>
           <span>Fake credential tripwire triggered</span>
         </div>
@@ -174,7 +176,9 @@ export function EventTimeline({
                       </span>
                     )}
                     {event.kind === "net" && event.detail.blocked === true && (
-                      <strong className="blocked-badge">Blocked</strong>
+                      <strong className="blocked-badge">
+                        {event.detail.intercepted ? "Captured locally" : "Blocked"}
+                      </strong>
                     )}
                     {isCanary(event) && <strong className="alert-badge">ALERT</strong>}
                   </div>

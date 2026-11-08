@@ -17,7 +17,8 @@
     "format:check": "prettier --check . ../tests/e2e",
     "test": "vitest run",
     "test:e2e": "node scripts/run-e2e.mjs",
-    "test:integration": "node --import tsx ../tests/e2e/real-api.ts"
+    "test:integration": "node --import tsx ../tests/e2e/real-api.ts",
+    "test:e2e:api": "node scripts/run-e2e.mjs --api"
   },
   "dependencies": {
     "next": "16.4.5",

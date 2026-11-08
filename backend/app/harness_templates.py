@@ -1,42 +1,31 @@
-BASH_HARNESS = """#!/bin/bash
-set +e
-cd /home/user/work
-export HOME=/home/user
-echo "[harness] profile=$PROFILE"
-bash artifact/install.sh
-echo "[harness] exit=$?"
-"""
+HARNESS = """import json
+import os
+import pathlib
+import subprocess
+import sys
 
-NPM_HARNESS = """#!/bin/bash
-set +e
-cd /home/user/work
-export HOME=/home/user
-for hook in preinstall install postinstall; do
-  if grep -q "\\"$hook\\"" artifact/package.json; then
-    echo "[harness] hook=$hook"
-    cmd=$(python3 -c "import json;print(json.load(open('artifact/package.json'))['scripts'].get('$hook',''))")
-    [ -n "$cmd" ] && bash -c "$cmd"
-  fi
-done
-echo "[harness] exit=$?"
-"""
-
-PYTHON_HARNESS = """#!/bin/bash
-set +e
-cd /home/user/work
-export HOME=/home/user
-python3 artifact/main.py
-echo "[harness] exit=$?"
+entry = pathlib.Path('/home/user/work/artifact') / os.environ['AIRLOCK_ARTIFACT_ENTRY']
+os.chdir(entry.parent)
+kind = os.environ['AIRLOCK_ARTIFACT_KIND']
+if kind == 'npm':
+    data = json.loads(entry.read_text())
+    for hook in ('preinstall', 'install', 'postinstall'):
+        command = data.get('scripts', {}).get(hook)
+        if command:
+            result = subprocess.run(['/bin/sh', '-c', command], check=False)
+            if result.returncode:
+                sys.exit(result.returncode)
+else:
+    interpreter = {'python': 'python3', 'node': 'node', 'bash': 'bash'}[kind]
+    os.execvp(interpreter, [interpreter, entry.name])
 """
 
 
 def pick(artifact_kind: str) -> dict:
-    """Return {"files": [...], "entrypoint": [...], "template": name}."""
-    if artifact_kind == "npm":
-        return {"files": [{"path": "work/harness.sh", "content": NPM_HARNESS}],
-                "entrypoint": ["bash", "work/harness.sh"], "template": "npm"}
-    if artifact_kind == "python":
-        return {"files": [{"path": "work/harness.sh", "content": PYTHON_HARNESS}],
-                "entrypoint": ["bash", "work/harness.sh"], "template": "python"}
-    return {"files": [{"path": "work/harness.sh", "content": BASH_HARNESS}],
-            "entrypoint": ["bash", "work/harness.sh"], "template": "bash"}
+    if artifact_kind not in {"python", "node", "bash", "npm"}:
+        raise ValueError("Unsupported artifact kind")
+    return {
+        "files": [{"path": "work/harness.py", "content": HARNESS}],
+        "entrypoint": ["python3", "work/harness.py"],
+        "template": artifact_kind,
+    }

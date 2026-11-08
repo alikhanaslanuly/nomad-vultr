@@ -14,6 +14,7 @@ import { useJob } from "./use-job";
 
 export function JobView({ id }: { id: string }) {
   const state = useJob(id);
+  const simulated = isMock || state.job?.mode === "mock" || state.report?.mode === "mock";
   const [selected, setSelected] = useState<Finding>();
   const [filters, setFilters] = useState<EventFilters>({ run: "all", severity: "all" });
   const [autoScroll, setAutoScroll] = useState(true);
@@ -32,7 +33,9 @@ export function JobView({ id }: { id: string }) {
       <div className="job-heading">
         <div>
           <p className="eyebrow">
-            {isMock ? "SIMULATED RUN / SYNTHETIC EVIDENCE" : "LIVE RUN / API EVIDENCE"}
+            {simulated
+              ? "SIMULATED RUN / SYNTHETIC EVIDENCE"
+              : "API RUN / RECEIVED EVIDENCE"}
           </p>
           <h1>{state.report ? "The evidence is in." : "Inside the airlock."}</h1>
           <p className="mono muted job-id">{id}</p>
@@ -43,10 +46,15 @@ export function JobView({ id }: { id: string }) {
           <span>{state.job?.status ?? "Loading job"}</span>
         </div>
       </div>
-      {isMock && (
+      {simulated && (
         <p className="simulation-notice">
-          MOCK: locally authored frontend fixtures. Team sample scenarios and fake
+          MOCK: synthetic frontend/backend fixtures. Team sample scenarios and fake
           canaries. No code execution. Reload replays the simulation.
+        </p>
+      )}
+      {!simulated && state.job && state.job.mode !== "live" && (
+        <p className="availability-note">
+          Execution mode was not recorded for this job. Runtime provenance is unverified.
         </p>
       )}
       <PipelineStages events={state.events} />
@@ -77,6 +85,7 @@ export function JobView({ id }: { id: string }) {
           onAutoScroll={setAutoScroll}
           truncated={state.truncated}
           canaryObserved={state.canaryObserved}
+          simulated={simulated}
         />
         <aside className="agent-panel panel">
           <div className="panel-heading">

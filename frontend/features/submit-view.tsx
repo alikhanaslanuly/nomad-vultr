@@ -13,14 +13,18 @@ import {
 } from "lucide-react";
 import { api, isMock } from "@/lib/api";
 import { errorMessage, isAborted } from "@/lib/errors";
-import { createJobSchema, type Profile, type Sample } from "@/lib/models";
+import { createJobSchema, type Health, type Profile, type Sample } from "@/lib/models";
+import { readUpload } from "./read-upload";
 import { ErrorNotice, Loading, SectionLabel } from "@/components/ui";
 
-type SampleState = { data: Sample[]; error?: string; loading: boolean };
-function sampleReducer(
-  state: SampleState,
-  action: { data?: Sample[]; error?: string; loading?: boolean },
-): SampleState {
+type SampleState = {
+  data: Sample[];
+  error?: string;
+  loading: boolean;
+  health?: Health;
+  healthError?: string;
+};
+function sampleReducer(state: SampleState, action: Partial<SampleState>): SampleState {
   return { ...state, ...action };
 }
 
@@ -28,10 +32,13 @@ export function SubmitView() {
   const router = useRouter();
   const [samples, dispatch] = useReducer(sampleReducer, { data: [], loading: true });
   const [reload, setReload] = useState(0);
-  const [tab, setTab] = useState<"samples" | "paste">("samples");
+  const [tab, setTab] = useState<"samples" | "paste" | "upload">("samples");
   const [selected, setSelected] = useState("evil-installer");
   const [profiles, setProfiles] = useState<Profile[]>(["dev-laptop", "ci"]);
   const [content, setContent] = useState("");
+  const [filename, setFilename] = useState("install.sh");
+  const [archive, setArchive] = useState<{ filename: string; content: string }>();
+  const [tier, setTier] = useState<"standard" | "burn">("standard");
   const [claim, setClaim] = useState("");
   const [invite, setInvite] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -47,6 +54,12 @@ export function SubmitView() {
       .then((data) => dispatch({ data, loading: false }))
       .catch((reason: unknown) => {
         if (!isAborted(reason)) dispatch({ error: errorMessage(reason), loading: false });
+      });
+    api
+      .getHealth(controller.signal)
+      .then((health) => dispatch({ health, healthError: undefined }))
+      .catch((reason: unknown) => {
+        if (!isAborted(reason)) dispatch({ healthError: errorMessage(reason) });
       });
     return () => controller.abort();
   }, [reload]);
@@ -68,15 +81,15 @@ export function SubmitView() {
       return;
     }
     const input = createJobSchema.safeParse({
-      input_type: "paste",
-      content,
-      filename: "submitted.txt",
+      input_type: tab === "upload" ? "zip" : "paste",
+      content: tab === "upload" ? archive?.content : content,
+      filename: tab === "upload" ? archive?.filename : filename,
       claim: claim.trim() || undefined,
       profiles,
-      tier: "standard",
+      tier,
       invite_code: invite || undefined,
     });
-    if (tab === "paste" && !input.success) {
+    if (tab !== "samples" && !input.success) {
       setError("Enter source text (up to 200,000 characters) and select a profile.");
       return;
     }
@@ -93,7 +106,7 @@ export function SubmitView() {
         tab === "samples"
           ? await api.runSample(
               selected,
-              { profiles, tier: "standard" },
+              { profiles, tier, invite_code: invite || undefined },
               request.current.signal,
             )
           : input.success
@@ -161,14 +174,20 @@ export function SubmitView() {
             onKeyDown={(event) => {
               if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
               event.preventDefault();
+              const tabs: ("samples" | "paste" | "upload")[] =
+                samples.health?.capabilities?.zip && !isMock
+                  ? ["samples", "paste", "upload"]
+                  : ["samples", "paste"];
+              const index = tabs.indexOf(tab);
               const next =
                 event.key === "Home"
-                  ? "samples"
+                  ? tabs[0]
                   : event.key === "End"
-                    ? "paste"
-                    : tab === "samples"
-                      ? "paste"
-                      : "samples";
+                    ? tabs[tabs.length - 1]
+                    : tabs[
+                        (index + (event.key === "ArrowLeft" ? -1 : 1) + tabs.length) %
+                          tabs.length
+                      ];
               setTab(next);
               event.currentTarget
                 .querySelector<HTMLButtonElement>(`#${next}-tab`)
@@ -199,11 +218,23 @@ export function SubmitView() {
               <FileCode2 size={16} />
               Paste source
             </button>
+            <button
+              id="upload-tab"
+              role="tab"
+              type="button"
+              aria-selected={tab === "upload"}
+              aria-controls="upload-panel"
+              tabIndex={tab === "upload" ? 0 : -1}
+              disabled={isMock || !samples.health?.capabilities?.zip}
+              onClick={() => setTab("upload")}
+            >
+              Upload file
+            </button>
             <span
               className="unavailable-input"
               title="Requires backend capability confirmation"
             >
-              npm / ZIP unavailable
+              npm registry unavailable
             </span>
           </div>
           {tab === "samples" ? (
@@ -250,6 +281,63 @@ export function SubmitView() {
                 </label>
               ))}
             </div>
+          ) : tab === "upload" ? (
+            <div
+              role="tabpanel"
+              id="upload-panel"
+              aria-labelledby="upload-tab"
+              className="paste-panel"
+            >
+              <label htmlFor="artifact-file">
+                Python, shell, JavaScript, package.json or ZIP · up to 2 MiB
+              </label>
+              <input
+                id="artifact-file"
+                type="file"
+                accept=".zip,.py,.sh,.bash,.js,.mjs,.cjs,.json"
+                onChange={async (event) => {
+                  setArchive(undefined);
+                  const file = event.target.files?.[0];
+                  if (!file) return;
+                  try {
+                    const upload = await readUpload(file);
+                    if (upload.inputType === "zip") setArchive(upload);
+                    else {
+                      setFilename(upload.filename);
+                      setContent(upload.content);
+                      setTab("paste");
+                    }
+                    setError(undefined);
+                  } catch (reason: unknown) {
+                    setError(
+                      reason instanceof Error
+                        ? reason.message
+                        : "Upload could not be read.",
+                    );
+                  }
+                }}
+              />
+              <p className="fine-print">
+                {archive
+                  ? `Selected archive: ${archive.filename}`
+                  : "ZIP requires one entrypoint: main.py, index.js, install.sh or package.json. Package hooks execute offline inside the sandbox."}
+              </p>
+              <label htmlFor="zip-claim">Claim (optional)</label>
+              <input
+                id="zip-claim"
+                value={claim}
+                maxLength={2000}
+                onChange={(event) => setClaim(event.target.value)}
+              />
+              <label htmlFor="zip-invite">Invite code</label>
+              <input
+                id="zip-invite"
+                type="password"
+                autoComplete="off"
+                value={invite}
+                onChange={(event) => setInvite(event.target.value)}
+              />
+            </div>
           ) : (
             <div
               role="tabpanel"
@@ -257,6 +345,14 @@ export function SubmitView() {
               aria-labelledby="paste-tab"
               className="paste-panel"
             >
+              <label htmlFor="source-filename">Original filename</label>
+              <input
+                id="source-filename"
+                value={filename}
+                maxLength={200}
+                onChange={(event) => setFilename(event.target.value)}
+                required
+              />
               <label htmlFor="source-input">Source text</label>
               <textarea
                 id="source-input"
@@ -322,9 +418,45 @@ export function SubmitView() {
                 <code>unavailable</code>
               </label>
             </fieldset>
-            <p className="fine-print">
-              Standard tier · Burn tier awaits backend confirmation.
-            </p>
+            <label className="source-select">
+              Isolation tier
+              <select
+                value={tier}
+                onChange={(event) =>
+                  setTier(event.target.value === "burn" ? "burn" : "standard")
+                }
+              >
+                <option value="standard">Standard sandbox</option>
+                <option
+                  value="burn"
+                  disabled={!samples.health?.capabilities?.burn || tab === "samples"}
+                >
+                  Burn VM (requires configured Vultr + invite)
+                </option>
+              </select>
+            </label>
+            {tier === "burn" && (
+              <p className="availability-note">
+                Creates a billed disposable VM. Completion requires confirmed deletion
+                from Vultr. An invite code is required.
+              </p>
+            )}
+            {samples.healthError && (
+              <ErrorNotice
+                message={samples.healthError}
+                retry={() => setReload((value) => value + 1)}
+              />
+            )}
+            {samples.health?.mode === "live" && !samples.health.observer_verified && (
+              <p className="availability-note">
+                Runner observation is not verified. Live analysis may be unavailable.
+              </p>
+            )}
+            {samples.health?.mode === "mock" && !isMock && (
+              <p className="simulation-notice">
+                Backend MOCK/STUB mode: no real sandbox evidence.
+              </p>
+            )}
           </div>
           {error && <ErrorNotice message={error} />}
           <div className="submit-footer">
@@ -339,7 +471,8 @@ export function SubmitView() {
               type="submit"
               disabled={
                 submitting ||
-                (tab === "paste" && isMock) ||
+                (tab !== "samples" && isMock) ||
+                (tab === "upload" && !archive) ||
                 (tab === "samples" && (samples.loading || !samples.data.length))
               }
             >

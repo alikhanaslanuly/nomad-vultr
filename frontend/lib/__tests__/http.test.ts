@@ -68,6 +68,29 @@ describe("API boundary", () => {
     expect(fetcher.mock.calls[0][0]).toBe("/api/jobs");
     expect(post({ text: "<script>" }).body).toBe('{"text":"<script>"}');
   });
+  it("accepts the deployed sample 201 response and preserves uploaded filename", async () => {
+    const fetcher = vi
+      .fn()
+      .mockImplementation(
+        async () => new Response('{"job_id":"job-created"}', { status: 201 }),
+      );
+    vi.stubGlobal("fetch", fetcher);
+    const api = createRealApi("/api");
+    await expect(
+      api.runSample("benign-csv-tool", { profiles: ["ci"], tier: "standard" }),
+    ).resolves.toEqual({ job_id: "job-created" });
+    await api.createJob({
+      input_type: "paste",
+      filename: "script.py",
+      content: "print(1)",
+      profiles: ["ci"],
+      tier: "standard",
+    });
+    expect(JSON.parse(fetcher.mock.calls[1][1].body)).toMatchObject({
+      filename: "script.py",
+      input_type: "paste",
+    });
+  });
   it("rejects an unobserved history wrapper instead of fabricating jobs", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response('{"items":[]}')));
     await expect(createRealApi("/api").listJobs()).rejects.toThrow();

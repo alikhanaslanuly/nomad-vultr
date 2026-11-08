@@ -41,6 +41,13 @@ async function main() {
     );
   };
   const api = createRealApi(base);
+  const health = await api.getHealth(AbortSignal.timeout(15000));
+  assert(
+    health.mode === "live" &&
+      health.observer_verified === true &&
+      health.runner === "up",
+    "Real suite requires a verified live runner, not a backend stub",
+  );
   const samples = await api.listSamples(AbortSignal.timeout(15000));
   checkSecrets(samples);
   for (const id of ["evil-installer", "benign-csv-tool", "readme-lies"]) {
