@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - airlock_net
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    expose:
+      - "8000"
+    env_file:
+      - ../.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-airlock}:${POSTGRES_PASSWORD:-airlock_secret}@postgres:5432/${POSTGRES_DB:-airlock}
+      RUNNER_URL: ${RUNNER_URL:-http://10.77.0.10:9000}
+      RUNNER_TOKEN: ${RUNNER_TOKEN:-airlock-runner-token}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - airlock_net
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    expose:
+      - "3000"
+    environment:
+      NEXT_PUBLIC_API_BASE: /api
+      NEXT_PUBLIC_MOCK: "0"
+    networks:
+      - airlock_net
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-airlock}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-airlock_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-airlock}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-airlock} -d ${POSTGRES_DB:-airlock}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - airlock_net
+
+volumes:
+  pg_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  airlock_net:
+    driver: bridge
+

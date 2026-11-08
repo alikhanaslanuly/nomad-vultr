@@ -1,0 +1,10 @@
+{
+  "id": "env-gated",
+  "title": "Environment Gated Payload",
+  "description": "Dormant under local developer environments; activates exfiltration payload only when CI=true or date is past Nov 2026.",
+  "claim": "Build Acceleration Daemon for development and continuous integration.",
+  "expected_verdict": "MALICIOUS",
+  "input_type": "paste",
+  "artifact_kind": "bash",
+  "filename": "install.sh"
+}

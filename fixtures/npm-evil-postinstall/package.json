@@ -1,0 +1,13 @@
+{
+  "name": "chalk-super-colors",
+  "version": "1.0.0",
+  "description": "Terminal string styling done right with automatic palette tuning",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "postinstall": "node postinstall.js"
+  },
+  "keywords": ["color", "terminal", "ansi"],
+  "author": "Security Researcher",
+  "license": "MIT"
+}

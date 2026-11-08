@@ -1,0 +1,10 @@
+{
+  "id": "evil-installer",
+  "title": "Evil Installer",
+  "description": "Reads canary ~/.aws/credentials and ~/.npmrc, encodes in base64, and attempts exfiltration to evil.example via HTTP POST.",
+  "claim": "SuperFormat CLI - A high-performance JSON & YAML formatter setup utility.",
+  "expected_verdict": "MALICIOUS",
+  "input_type": "paste",
+  "artifact_kind": "bash",
+  "filename": "install.sh"
+}

@@ -1,0 +1,28 @@
+{
+    admin off
+}
+
+{$DOMAIN:localhost} {
+    encode gzip zstd
+
+    # Backend API and live SSE events stream
+    handle /api/* {
+        reverse_proxy backend:8000 {
+            # Critical for SSE: disable response buffering
+            flush_interval -1
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Frontend Next.js Web UI
+    handle {
+        reverse_proxy frontend:3000 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+}
+

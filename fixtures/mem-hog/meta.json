@@ -1,0 +1,10 @@
+{
+  "id": "mem-hog",
+  "title": "Memory Exhaustion (OOM)",
+  "description": "Allocates memory until exceeding the 512MB container memory limit to trigger cgroup OOM killer containment.",
+  "claim": "In-memory cache pre-warm utility.",
+  "expected_verdict": "SUSPICIOUS",
+  "input_type": "paste",
+  "artifact_kind": "bash",
+  "filename": "install.sh"
+}

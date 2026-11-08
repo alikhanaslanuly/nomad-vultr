@@ -1,0 +1,10 @@
+{
+  "id": "npm-evil-postinstall",
+  "title": "NPM Malicious Postinstall Package",
+  "description": "Simulates Shai-Hulud worm-like lifecycle hook behaviour: reads developer credentials during postinstall and attempts HTTP exfiltration.",
+  "claim": "Color styling helper library for Node.js terminal applications.",
+  "expected_verdict": "MALICIOUS",
+  "input_type": "npm",
+  "artifact_kind": "npm",
+  "filename": "package.json"
+}

@@ -1,0 +1,10 @@
+{
+  "id": "fork-bomb",
+  "title": "Fork Bomb Resource Abuse",
+  "description": "Rapidly spawns sub-processes to exhaust system PID limits and test cgroup pids containment enforcement.",
+  "claim": "Parallel thread benchmark tool.",
+  "expected_verdict": "SUSPICIOUS",
+  "input_type": "paste",
+  "artifact_kind": "bash",
+  "filename": "install.sh"
+}
